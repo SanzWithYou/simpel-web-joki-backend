@@ -82,17 +82,11 @@ func SaveUploadToS3(file multipart.File, header *multipart.FileHeader, subDir st
 
 // DeleteFileFromS3 deletes a file from S3
 func DeleteFileFromS3(url string) error {
-	// Extract key from URL
-	// URL format: https://bucket-name.endpoint/key
-	// Example: https://zembud.s3.ap-southeast-1.idrivee2.com/bukti_transfer/file.jpg
 	parts := strings.Split(url, "/")
 	if len(parts) < 5 {
 		return errors.New("URL tidak valid")
 	}
 
-	// Join the key parts (everything after the bucket name and endpoint)
-	// The first 4 parts are: https:, , bucket-name.endpoint,
-	// So the key starts from index 4
 	key := strings.Join(parts[4:], "/")
 
 	s3Client := storage.NewS3Client()
