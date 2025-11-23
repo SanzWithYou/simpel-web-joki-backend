@@ -1,8 +1,13 @@
 package utils
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"math"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -20,7 +25,7 @@ type EmailConfig struct {
 	BCC     []string
 }
 
-// Kirim email
+// Kirim email dengan retry mechanism
 func SendEmail(config EmailConfig) error {
 	// Ambil API key
 	apiKey := os.Getenv("RESEND_API_KEY")
@@ -61,15 +66,110 @@ func SendEmail(config EmailConfig) error {
 		params.Bcc = config.BCC
 	}
 
-	// Kirim email
-	_, err := client.Emails.Send(params)
-	if err != nil {
-		log.Printf("Failed to send email: %v", err)
-		return fmt.Errorf("failed to send email: %w", err)
+	// Retry mechanism
+	maxRetries := 3
+	var lastErr error
+
+	for i := 0; i < maxRetries; i++ {
+		// Try to send email
+		_, err := client.Emails.Send(params)
+		if err == nil {
+			log.Printf("Email successfully sent to %s", config.To)
+			return nil
+		}
+
+		lastErr = err
+		log.Printf("Attempt %d failed to send email: %v", i+1, err)
+
+		// Wait before retrying (exponential backoff)
+		if i < maxRetries-1 {
+			waitTime := time.Duration(math.Pow(2, float64(i+1))) * time.Second
+			time.Sleep(waitTime)
+		}
 	}
 
-	log.Printf("Email successfully sent to %s", config.To)
-	return nil
+	return fmt.Errorf("failed to send email after %d attempts, last error: %w", maxRetries, lastErr)
+}
+
+// Alternatif: Kirim email menggunakan HTTP client langsung dengan timeout
+func SendEmailWithHTTPClient(config EmailConfig) error {
+	// Ambil API key
+	apiKey := os.Getenv("RESEND_API_KEY")
+	if apiKey == "" {
+		return fmt.Errorf("RESEND_API_KEY is not set in environment variables")
+	}
+
+	// Ambil sender
+	senderEmail := os.Getenv("RESEND_SENDER_EMAIL")
+	if senderEmail == "" {
+		senderEmail = "onboarding@resend.dev"
+	}
+
+	// Siapkan payload
+	payload := map[string]interface{}{
+		"from":    senderEmail,
+		"to":      []string{config.To},
+		"subject": config.Subject,
+	}
+
+	// Set konten
+	if config.HTML != "" {
+		payload["html"] = config.HTML
+	} else if config.Text != "" {
+		payload["text"] = config.Text
+	} else {
+		return fmt.Errorf("either HTML or Text content must be provided")
+	}
+
+	// Tambah CC/BCC
+	if len(config.CC) > 0 {
+		payload["cc"] = config.CC
+	}
+	if len(config.BCC) > 0 {
+		payload["bcc"] = config.BCC
+	}
+
+	// Convert payload to JSON
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %w", err)
+	}
+
+	// Create HTTP request with timeout
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	req, err := http.NewRequest("POST", "https://api.resend.com/emails", bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Set headers
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("User-Agent", "zem-store/1.0")
+
+	// Send request
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Check response status
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		log.Printf("Email successfully sent to %s", config.To)
+		return nil
+	}
+
+	// Read response body for error details
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("request failed with status %d and failed to read response body: %w", resp.StatusCode, err)
+	}
+
+	return fmt.Errorf("request failed with status %d and response: %s", resp.StatusCode, string(body))
 }
 
 // Notifikasi order
@@ -294,6 +394,7 @@ func SendNewOrderNotificationEmail(orderID uint, username, jokiType, buktiTransf
 		HTML:    emailContent,
 	}
 
+	// Gunakan fungsi dengan retry mechanism
 	return SendEmail(config)
 }
 
@@ -487,5 +588,6 @@ func SendCustomServiceRequestEmail(requestID uint, name, email, service string) 
 		HTML:    emailContent,
 	}
 
+	// Gunakan fungsi dengan retry mechanism
 	return SendEmail(config)
 }
