@@ -1,0 +1,16 @@
+# Env
+.env
+.env.*
+!example.env
+
+# Build / binary
+/build
+/bin
+/dist
+*.exe
+*.test
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
