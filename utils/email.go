@@ -2,17 +2,14 @@ package utils
 
 import (
 	"bytes"
-	"encoding/json"
+	"crypto/tls"
 	"fmt"
-	"io"
 	"log"
 	"math"
-	"net/http"
+	"net/smtp"
 	"os"
 	"strings"
 	"time"
-
-	"github.com/resend/resend-go/v3"
 )
 
 // Email config
@@ -25,45 +22,203 @@ type EmailConfig struct {
 	BCC     []string
 }
 
+// SMTP Config dari environment variables
+type SMTPConfig struct {
+	Host     string
+	Port     string
+	Username string
+	Password string
+	From     string
+	FromName string
+}
+
+// Ambil konfigurasi SMTP dari environment
+func getSMTPConfig() (*SMTPConfig, error) {
+	host := os.Getenv("SMTP_HOST")
+	if host == "" {
+		return nil, fmt.Errorf("SMTP_HOST is not set in environment variables")
+	}
+
+	port := os.Getenv("SMTP_PORT")
+	if port == "" {
+		port = "587" // default port
+	}
+
+	username := os.Getenv("SMTP_USERNAME")
+	if username == "" {
+		return nil, fmt.Errorf("SMTP_USERNAME is not set in environment variables")
+	}
+
+	password := os.Getenv("SMTP_PASSWORD")
+	if password == "" {
+		return nil, fmt.Errorf("SMTP_PASSWORD is not set in environment variables")
+	}
+
+	from := os.Getenv("SMTP_FROM_EMAIL")
+	if from == "" {
+		from = username // gunakan username sebagai default
+	}
+
+	fromName := os.Getenv("SMTP_FROM_NAME")
+	if fromName == "" {
+		fromName = "Zem Store"
+	}
+
+	return &SMTPConfig{
+		Host:     host,
+		Port:     port,
+		Username: username,
+		Password: password,
+		From:     from,
+		FromName: fromName,
+	}, nil
+}
+
+// Build email message dengan format MIME
+func buildEmailMessage(config EmailConfig, smtpConfig *SMTPConfig) []byte {
+	var buf bytes.Buffer
+
+	// Headers
+	buf.WriteString(fmt.Sprintf("From: %s <%s>\r\n", smtpConfig.FromName, smtpConfig.From))
+	buf.WriteString(fmt.Sprintf("To: %s\r\n", config.To))
+
+	if len(config.CC) > 0 {
+		buf.WriteString(fmt.Sprintf("Cc: %s\r\n", strings.Join(config.CC, ", ")))
+	}
+
+	if len(config.BCC) > 0 {
+		buf.WriteString(fmt.Sprintf("Bcc: %s\r\n", strings.Join(config.BCC, ", ")))
+	}
+
+	buf.WriteString(fmt.Sprintf("Subject: %s\r\n", config.Subject))
+	buf.WriteString("MIME-Version: 1.0\r\n")
+
+	// Jika ada HTML dan Text, gunakan multipart/alternative
+	if config.HTML != "" && config.Text != "" {
+		boundary := "boundary-" + time.Now().Format("20060102150405")
+		buf.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=\"%s\"\r\n", boundary))
+		buf.WriteString("\r\n")
+
+		// Plain text part
+		buf.WriteString(fmt.Sprintf("--%s\r\n", boundary))
+		buf.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")
+		buf.WriteString("Content-Transfer-Encoding: 7bit\r\n")
+		buf.WriteString("\r\n")
+		buf.WriteString(config.Text)
+		buf.WriteString("\r\n")
+
+		// HTML part
+		buf.WriteString(fmt.Sprintf("--%s\r\n", boundary))
+		buf.WriteString("Content-Type: text/html; charset=\"UTF-8\"\r\n")
+		buf.WriteString("Content-Transfer-Encoding: 7bit\r\n")
+		buf.WriteString("\r\n")
+		buf.WriteString(config.HTML)
+		buf.WriteString("\r\n")
+
+		buf.WriteString(fmt.Sprintf("--%s--\r\n", boundary))
+	} else if config.HTML != "" {
+		// Hanya HTML
+		buf.WriteString("Content-Type: text/html; charset=\"UTF-8\"\r\n")
+		buf.WriteString("Content-Transfer-Encoding: 7bit\r\n")
+		buf.WriteString("\r\n")
+		buf.WriteString(config.HTML)
+	} else if config.Text != "" {
+		// Hanya Text
+		buf.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")
+		buf.WriteString("Content-Transfer-Encoding: 7bit\r\n")
+		buf.WriteString("\r\n")
+		buf.WriteString(config.Text)
+	}
+
+	return buf.Bytes()
+}
+
+// Kirim email dengan SMTP
+func sendSMTPEmail(config EmailConfig, smtpConfig *SMTPConfig) error {
+	// Build recipients list
+	recipients := []string{config.To}
+	recipients = append(recipients, config.CC...)
+	recipients = append(recipients, config.BCC...)
+
+	// Build message
+	message := buildEmailMessage(config, smtpConfig)
+
+	// Setup authentication
+	auth := smtp.PlainAuth("", smtpConfig.Username, smtpConfig.Password, smtpConfig.Host)
+
+	// Connect to the server with TLS
+	serverAddr := fmt.Sprintf("%s:%s", smtpConfig.Host, smtpConfig.Port)
+
+	// Try to send with STARTTLS
+	tlsConfig := &tls.Config{
+		ServerName: smtpConfig.Host,
+	}
+
+	// Attempt to send
+	err := smtp.SendMail(serverAddr, auth, smtpConfig.From, recipients, message)
+	if err != nil {
+		// If failed, try with explicit TLS connection
+		client, err := smtp.Dial(serverAddr)
+		if err != nil {
+			return fmt.Errorf("failed to connect to SMTP server: %w", err)
+		}
+		defer client.Close()
+
+		// Start TLS
+		if err = client.StartTLS(tlsConfig); err != nil {
+			return fmt.Errorf("failed to start TLS: %w", err)
+		}
+
+		// Authenticate
+		if err = client.Auth(auth); err != nil {
+			return fmt.Errorf("failed to authenticate: %w", err)
+		}
+
+		// Set sender
+		if err = client.Mail(smtpConfig.From); err != nil {
+			return fmt.Errorf("failed to set sender: %w", err)
+		}
+
+		// Set recipients
+		for _, recipient := range recipients {
+			if err = client.Rcpt(recipient); err != nil {
+				return fmt.Errorf("failed to set recipient %s: %w", recipient, err)
+			}
+		}
+
+		// Send message
+		w, err := client.Data()
+		if err != nil {
+			return fmt.Errorf("failed to send DATA command: %w", err)
+		}
+
+		_, err = w.Write(message)
+		if err != nil {
+			return fmt.Errorf("failed to write message: %w", err)
+		}
+
+		err = w.Close()
+		if err != nil {
+			return fmt.Errorf("failed to close writer: %w", err)
+		}
+
+		return client.Quit()
+	}
+
+	return nil
+}
+
 // Kirim email dengan retry mechanism
 func SendEmail(config EmailConfig) error {
-	// Ambil API key
-	apiKey := os.Getenv("RESEND_API_KEY")
-	if apiKey == "" {
-		return fmt.Errorf("RESEND_API_KEY is not set in environment variables")
-	}
-
-	// Ambil sender
-	senderEmail := os.Getenv("RESEND_SENDER_EMAIL")
-	if senderEmail == "" {
-		senderEmail = "onboarding@resend.dev"
-	}
-
-	// Buat klien
-	client := resend.NewClient(apiKey)
-
-	// Siapkan params
-	params := &resend.SendEmailRequest{
-		From:    senderEmail,
-		To:      []string{config.To},
-		Subject: config.Subject,
-	}
-
-	// Set konten
-	if config.HTML != "" {
-		params.Html = config.HTML
-	} else if config.Text != "" {
-		params.Text = config.Text
-	} else {
+	// Validasi konten
+	if config.HTML == "" && config.Text == "" {
 		return fmt.Errorf("either HTML or Text content must be provided")
 	}
 
-	// Tambah CC/BCC
-	if len(config.CC) > 0 {
-		params.Cc = config.CC
-	}
-	if len(config.BCC) > 0 {
-		params.Bcc = config.BCC
+	// Ambil SMTP config
+	smtpConfig, err := getSMTPConfig()
+	if err != nil {
+		return fmt.Errorf("failed to get SMTP config: %w", err)
 	}
 
 	// Retry mechanism
@@ -72,7 +227,7 @@ func SendEmail(config EmailConfig) error {
 
 	for i := 0; i < maxRetries; i++ {
 		// Try to send email
-		_, err := client.Emails.Send(params)
+		err := sendSMTPEmail(config, smtpConfig)
 		if err == nil {
 			log.Printf("Email successfully sent to %s", config.To)
 			return nil
@@ -91,85 +246,23 @@ func SendEmail(config EmailConfig) error {
 	return fmt.Errorf("failed to send email after %d attempts, last error: %w", maxRetries, lastErr)
 }
 
-// Alternatif: Kirim email menggunakan HTTP client langsung dengan timeout
-func SendEmailWithHTTPClient(config EmailConfig) error {
-	// Ambil API key
-	apiKey := os.Getenv("RESEND_API_KEY")
-	if apiKey == "" {
-		return fmt.Errorf("RESEND_API_KEY is not set in environment variables")
-	}
+// Alternatif: Kirim email dengan timeout (wrapper untuk SendEmail)
+func SendEmailWithTimeout(config EmailConfig, timeout time.Duration) error {
+	// Channel untuk hasil
+	done := make(chan error, 1)
 
-	// Ambil sender
-	senderEmail := os.Getenv("RESEND_SENDER_EMAIL")
-	if senderEmail == "" {
-		senderEmail = "onboarding@resend.dev"
-	}
+	// Jalankan pengiriman email di goroutine
+	go func() {
+		done <- SendEmail(config)
+	}()
 
-	// Siapkan payload
-	payload := map[string]interface{}{
-		"from":    senderEmail,
-		"to":      []string{config.To},
-		"subject": config.Subject,
+	// Tunggu dengan timeout
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("email sending timeout after %v", timeout)
 	}
-
-	// Set konten
-	if config.HTML != "" {
-		payload["html"] = config.HTML
-	} else if config.Text != "" {
-		payload["text"] = config.Text
-	} else {
-		return fmt.Errorf("either HTML or Text content must be provided")
-	}
-
-	// Tambah CC/BCC
-	if len(config.CC) > 0 {
-		payload["cc"] = config.CC
-	}
-	if len(config.BCC) > 0 {
-		payload["bcc"] = config.BCC
-	}
-
-	// Convert payload to JSON
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	// Create HTTP request with timeout
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
-	req, err := http.NewRequest("POST", "https://api.resend.com/emails", bytes.NewBuffer(payloadBytes))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set headers
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("User-Agent", "zem-store/1.0")
-
-	// Send request
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Check response status
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		log.Printf("Email successfully sent to %s", config.To)
-		return nil
-	}
-
-	// Read response body for error details
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("request failed with status %d and failed to read response body: %w", resp.StatusCode, err)
-	}
-
-	return fmt.Errorf("request failed with status %d and response: %s", resp.StatusCode, string(body))
 }
 
 // Notifikasi order
@@ -186,7 +279,7 @@ func SendNewOrderNotificationEmail(orderID uint, username, jokiType, buktiTransf
 	// Ekstrak path
 	parts := strings.Split(buktiTransferPath, "/")
 	if len(parts) < 5 {
-		return fmt.Errorf("Invalid URL format: %s", buktiTransferPath)
+		return fmt.Errorf("invalid URL format: %s", buktiTransferPath)
 	}
 	relativePath := strings.Join(parts[4:], "/")
 
