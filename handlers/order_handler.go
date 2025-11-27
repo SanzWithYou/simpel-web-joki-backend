@@ -114,24 +114,17 @@ func (h *OrderHandler) CreateOrderWithFile(c *fiber.Ctx) error {
 		log.Printf("📧 Attempting to send email for order %d", order.ID)
 		log.Printf("📧 Email config - Username: %s, Joki: %s", username, joki)
 
-		// Kirim email dengan timeout
-		err := utils.SendEmailWithTimeout(utils.EmailConfig{
-			To:      "", // Will be filled from env in SendNewOrderNotificationEmail
-			Subject: "",
-			HTML:    "",
-		}, 25*time.Second)
-
-		// Sebenarnya panggil fungsi yang sudah ada
-		err = utils.SendNewOrderNotificationEmail(order.ID, username, joki, order.BuktiTransfer)
+		// Panggil fungsi pengiriman email
+		emailErr := utils.SendNewOrderNotificationEmail(order.ID, username, joki, order.BuktiTransfer)
 
 		select {
 		case <-ctx.Done():
 			log.Printf("❌ Email sending cancelled/timeout for order %d: %v", order.ID, ctx.Err())
 			emailDone <- ctx.Err()
 		default:
-			if err != nil {
-				log.Printf("❌ Failed to send admin notification email for order %d: %v", order.ID, err)
-				emailDone <- err
+			if emailErr != nil {
+				log.Printf("❌ Failed to send admin notification email for order %d: %v", order.ID, emailErr)
+				emailDone <- emailErr
 			} else {
 				log.Printf("✅ Admin notification email sent successfully for order %d", order.ID)
 				emailDone <- nil
