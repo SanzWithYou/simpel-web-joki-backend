@@ -5,7 +5,9 @@ import (
 	"backend/models"
 	"backend/utils"
 	"context"
+	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -105,7 +107,7 @@ func (h *OrderHandler) CreateOrderWithFile(c *fiber.Ctx) error {
 	go func() {
 		// PENTING: Gunakan context.Background() bukan context dari HTTP request
 		// Ini memastikan goroutine tidak di-cancel saat HTTP response selesai
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Kurangi timeout menjadi 30 detik
 		defer cancel()
 
 		// Log start
@@ -117,7 +119,12 @@ func (h *OrderHandler) CreateOrderWithFile(c *fiber.Ctx) error {
 
 		// Kirim email di goroutine terpisah
 		go func() {
-			err := utils.SendNewOrderNotificationEmail(order.ID, username, joki, order.BuktiTransfer)
+			// PERBAIKAN: Gunakan fungsi dengan timeout yang lebih pendek
+			err := utils.SendEmailWithTimeout(utils.EmailConfig{
+				To:      os.Getenv("ADMIN_NOTIFICATION_EMAIL"),
+				Subject: fmt.Sprintf("Order Baru #%d - Segera Proses!", order.ID),
+				HTML:    utils.GenerateOrderEmailTemplate(order.ID, username, joki, order.BuktiTransfer),
+			}, 25*time.Second) // Timeout 25 detik untuk pengiriman email
 			done <- err
 		}()
 
@@ -126,11 +133,13 @@ func (h *OrderHandler) CreateOrderWithFile(c *fiber.Ctx) error {
 		case emailErr := <-done:
 			if emailErr != nil {
 				log.Printf("❌ Failed to send admin notification email for order %d: %v", order.ID, emailErr)
+				// PERBAIKAN: Tambahkan informasi error lebih detail
+				log.Printf("❌ Error details: %+v", emailErr)
 			} else {
 				log.Printf("✅ Admin notification email sent successfully for order %d", order.ID)
 			}
 		case <-ctx.Done():
-			log.Printf("⏰ Email sending timeout for order %d after 45s", order.ID)
+			log.Printf("⏰ Email sending timeout for order %d after 30s", order.ID)
 		}
 	}()
 

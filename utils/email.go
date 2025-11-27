@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"net/smtp"
 	"os"
 	"strings"
@@ -149,63 +150,71 @@ func sendSMTPEmail(config EmailConfig, smtpConfig *SMTPConfig) error {
 	// Connect to the server with TLS
 	serverAddr := fmt.Sprintf("%s:%s", smtpConfig.Host, smtpConfig.Port)
 
-	// Try to send with STARTTLS
+	// PERBAIKAN: Gunakan timeout untuk koneksi SMTP dengan cara yang benar
+	// Buat dialer dengan timeout
+	dialer := &net.Dialer{
+		Timeout: 15 * time.Second,
+	}
+
+	// Buat koneksi dengan timeout
+	conn, err := dialer.Dial("tcp", serverAddr)
+	if err != nil {
+		return fmt.Errorf("failed to connect to SMTP server: %w", err)
+	}
+	defer conn.Close()
+
+	// Buat client SMTP dari koneksi
+	client, err := smtp.NewClient(conn, smtpConfig.Host)
+	if err != nil {
+		return fmt.Errorf("failed to create SMTP client: %w", err)
+	}
+	defer client.Close()
+
+	// PERBAIKAN: Tambahkan logging untuk debugging
+	log.Printf("🔌 Connected to SMTP server: %s", serverAddr)
+
+	// Start TLS
 	tlsConfig := &tls.Config{
 		ServerName: smtpConfig.Host,
 	}
-
-	// Attempt to send
-	err := smtp.SendMail(serverAddr, auth, smtpConfig.From, recipients, message)
-	if err != nil {
-		// If failed, try with explicit TLS connection
-		client, err := smtp.Dial(serverAddr)
-		if err != nil {
-			return fmt.Errorf("failed to connect to SMTP server: %w", err)
-		}
-		defer client.Close()
-
-		// Start TLS
-		if err = client.StartTLS(tlsConfig); err != nil {
-			return fmt.Errorf("failed to start TLS: %w", err)
-		}
-
-		// Authenticate
-		if err = client.Auth(auth); err != nil {
-			return fmt.Errorf("failed to authenticate: %w", err)
-		}
-
-		// Set sender
-		if err = client.Mail(smtpConfig.From); err != nil {
-			return fmt.Errorf("failed to set sender: %w", err)
-		}
-
-		// Set recipients
-		for _, recipient := range recipients {
-			if err = client.Rcpt(recipient); err != nil {
-				return fmt.Errorf("failed to set recipient %s: %w", recipient, err)
-			}
-		}
-
-		// Send message
-		w, err := client.Data()
-		if err != nil {
-			return fmt.Errorf("failed to send DATA command: %w", err)
-		}
-
-		_, err = w.Write(message)
-		if err != nil {
-			return fmt.Errorf("failed to write message: %w", err)
-		}
-
-		err = w.Close()
-		if err != nil {
-			return fmt.Errorf("failed to close writer: %w", err)
-		}
-
-		return client.Quit()
+	if err = client.StartTLS(tlsConfig); err != nil {
+		return fmt.Errorf("failed to start TLS: %w", err)
 	}
 
-	return nil
+	// Authenticate
+	if err = client.Auth(auth); err != nil {
+		return fmt.Errorf("failed to authenticate: %w", err)
+	}
+
+	// Set sender
+	if err = client.Mail(smtpConfig.From); err != nil {
+		return fmt.Errorf("failed to set sender: %w", err)
+	}
+
+	// Set recipients
+	for _, recipient := range recipients {
+		if err = client.Rcpt(recipient); err != nil {
+			return fmt.Errorf("failed to set recipient %s: %w", recipient, err)
+		}
+	}
+
+	// Send message
+	w, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("failed to send DATA command: %w", err)
+	}
+
+	_, err = w.Write(message)
+	if err != nil {
+		return fmt.Errorf("failed to write message: %w", err)
+	}
+
+	err = w.Close()
+	if err != nil {
+		return fmt.Errorf("failed to close writer: %w", err)
+	}
+
+	return client.Quit()
 }
 
 // Kirim email dengan retry mechanism
@@ -221,24 +230,25 @@ func SendEmail(config EmailConfig) error {
 		return fmt.Errorf("failed to get SMTP config: %w", err)
 	}
 
-	// Retry mechanism
-	maxRetries := 3
+	// PERBAIKAN: Kurangi jumlah retry dan waktu tunggu
+	maxRetries := 2
 	var lastErr error
 
 	for i := 0; i < maxRetries; i++ {
 		// Try to send email
 		err := sendSMTPEmail(config, smtpConfig)
 		if err == nil {
-			log.Printf("Email successfully sent to %s", config.To)
+			log.Printf("✅ Email successfully sent to %s", config.To)
 			return nil
 		}
 
 		lastErr = err
-		log.Printf("Attempt %d failed to send email: %v", i+1, err)
+		log.Printf("❌ Attempt %d failed to send email: %v", i+1, err)
 
 		// Wait before retrying (exponential backoff)
 		if i < maxRetries-1 {
 			waitTime := time.Duration(math.Pow(2, float64(i+1))) * time.Second
+			log.Printf("⏳ Waiting %v before retrying...", waitTime)
 			time.Sleep(waitTime)
 		}
 	}
@@ -265,11 +275,8 @@ func SendEmailWithTimeout(config EmailConfig, timeout time.Duration) error {
 	}
 }
 
-// Notifikasi order
-func SendNewOrderNotificationEmail(orderID uint, username, jokiType, buktiTransferPath string) error {
-	// Buat subjek
-	subject := fmt.Sprintf("Order Baru #%d - Segera Proses!", orderID)
-
+// PERBAIKAN: Pisahkan pembuatan template email
+func GenerateOrderEmailTemplate(orderID uint, username, jokiType, buktiTransferPath string) string {
 	// Ambil URL
 	backendURL := os.Getenv("BACKEND_URL")
 	if backendURL == "" {
@@ -279,7 +286,8 @@ func SendNewOrderNotificationEmail(orderID uint, username, jokiType, buktiTransf
 	// Ekstrak path
 	parts := strings.Split(buktiTransferPath, "/")
 	if len(parts) < 5 {
-		return fmt.Errorf("invalid URL format: %s", buktiTransferPath)
+		log.Printf("❌ Invalid URL format: %s", buktiTransferPath)
+		return ""
 	}
 	relativePath := strings.Join(parts[4:], "/")
 
@@ -293,7 +301,7 @@ func SendNewOrderNotificationEmail(orderID uint, username, jokiType, buktiTransf
 	}
 
 	// Template email
-	emailContent := fmt.Sprintf(`
+	return fmt.Sprintf(`
 <!DOCTYPE html>
 <html>
 <head>
@@ -474,7 +482,10 @@ func SendNewOrderNotificationEmail(orderID uint, username, jokiType, buktiTransf
 </body>
 </html>
 `, orderID, username, jokiType, time.Now().Format("02 January 2006, 15:04 WIB"), proofUrl, appName, appName)
+}
 
+// Notifikasi order
+func SendNewOrderNotificationEmail(orderID uint, username, jokiType, buktiTransferPath string) error {
 	// Ambil email admin
 	adminEmail := os.Getenv("ADMIN_NOTIFICATION_EMAIL")
 	if adminEmail == "" {
@@ -483,8 +494,8 @@ func SendNewOrderNotificationEmail(orderID uint, username, jokiType, buktiTransf
 
 	config := EmailConfig{
 		To:      adminEmail,
-		Subject: subject,
-		HTML:    emailContent,
+		Subject: fmt.Sprintf("Order Baru #%d - Segera Proses!", orderID),
+		HTML:    GenerateOrderEmailTemplate(orderID, username, jokiType, buktiTransferPath),
 	}
 
 	// Gunakan fungsi dengan retry mechanism
@@ -493,9 +504,6 @@ func SendNewOrderNotificationEmail(orderID uint, username, jokiType, buktiTransf
 
 // Email layanan kustom
 func SendCustomServiceRequestEmail(requestID uint, name, email, service string) error {
-	// Buat subjek
-	subject := fmt.Sprintf("Permintaan Layanan Kustom #%d", requestID)
-
 	// Ambil nama app
 	appName := os.Getenv("APP_NAME")
 	if appName == "" {
@@ -677,7 +685,7 @@ func SendCustomServiceRequestEmail(requestID uint, name, email, service string) 
 
 	config := EmailConfig{
 		To:      adminEmail,
-		Subject: subject,
+		Subject: fmt.Sprintf("Permintaan Layanan Kustom #%d", requestID),
 		HTML:    emailContent,
 	}
 
