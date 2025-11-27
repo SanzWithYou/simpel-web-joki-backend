@@ -65,6 +65,9 @@ func getSMTPConfig() (*SMTPConfig, error) {
 		fromName = "Zem Store"
 	}
 
+	// Tambahkan logging untuk konfigurasi SMTP
+	log.Printf("📧 SMTP Config - Host: %s, Port: %s, Username: %s, From: %s", host, port, username, from)
+
 	return &SMTPConfig{
 		Host:     host,
 		Port:     port,
@@ -134,6 +137,16 @@ func buildEmailMessage(config EmailConfig, smtpConfig *SMTPConfig) []byte {
 	return buf.Bytes()
 }
 
+// PERBAIKAN: Fungsi untuk membuat alamat server yang kompatibel dengan IPv6
+func formatServerAddress(host, port string) string {
+	// Jika host adalah alamat IPv6 (mengandung : dan tidak diapit [])
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") && !strings.HasSuffix(host, "]") {
+		return fmt.Sprintf("[%s]:%s", host, port)
+	}
+	// Untuk IPv4 atau hostname, gunakan format biasa
+	return fmt.Sprintf("%s:%s", host, port)
+}
+
 // Kirim email dengan SMTP
 func sendSMTPEmail(config EmailConfig, smtpConfig *SMTPConfig) error {
 	// Build recipients list
@@ -147,10 +160,12 @@ func sendSMTPEmail(config EmailConfig, smtpConfig *SMTPConfig) error {
 	// Setup authentication
 	auth := smtp.PlainAuth("", smtpConfig.Username, smtpConfig.Password, smtpConfig.Host)
 
-	// Connect to the server with TLS
-	serverAddr := fmt.Sprintf("%s:%s", smtpConfig.Host, smtpConfig.Port)
+	// PERBAIKAN: Gunakan fungsi formatServerAddress untuk menangani IPv6
+	serverAddr := formatServerAddress(smtpConfig.Host, smtpConfig.Port)
 
-	// PERBAIKAN: Gunakan timeout untuk koneksi SMTP dengan cara yang benar
+	log.Printf("🔌 Attempting to connect to SMTP server: %s", serverAddr)
+
+	// Gunakan timeout untuk koneksi SMTP dengan cara yang benar
 	// Buat dialer dengan timeout
 	dialer := &net.Dialer{
 		Timeout: 15 * time.Second,
@@ -159,62 +174,86 @@ func sendSMTPEmail(config EmailConfig, smtpConfig *SMTPConfig) error {
 	// Buat koneksi dengan timeout
 	conn, err := dialer.Dial("tcp", serverAddr)
 	if err != nil {
+		log.Printf("❌ Failed to connect to SMTP server: %v", err)
 		return fmt.Errorf("failed to connect to SMTP server: %w", err)
 	}
 	defer conn.Close()
 
+	log.Printf("✅ Connected to SMTP server successfully")
+
 	// Buat client SMTP dari koneksi
 	client, err := smtp.NewClient(conn, smtpConfig.Host)
 	if err != nil {
+		log.Printf("❌ Failed to create SMTP client: %v", err)
 		return fmt.Errorf("failed to create SMTP client: %w", err)
 	}
 	defer client.Close()
-
-	// PERBAIKAN: Tambahkan logging untuk debugging
-	log.Printf("🔌 Connected to SMTP server: %s", serverAddr)
 
 	// Start TLS
 	tlsConfig := &tls.Config{
 		ServerName: smtpConfig.Host,
 	}
 	if err = client.StartTLS(tlsConfig); err != nil {
+		log.Printf("❌ Failed to start TLS: %v", err)
 		return fmt.Errorf("failed to start TLS: %w", err)
 	}
 
+	log.Printf("✅ TLS started successfully")
+
 	// Authenticate
 	if err = client.Auth(auth); err != nil {
+		log.Printf("❌ Failed to authenticate: %v", err)
 		return fmt.Errorf("failed to authenticate: %w", err)
 	}
 
+	log.Printf("✅ Authentication successful")
+
 	// Set sender
 	if err = client.Mail(smtpConfig.From); err != nil {
+		log.Printf("❌ Failed to set sender: %v", err)
 		return fmt.Errorf("failed to set sender: %w", err)
 	}
+
+	log.Printf("✅ Sender set successfully")
 
 	// Set recipients
 	for _, recipient := range recipients {
 		if err = client.Rcpt(recipient); err != nil {
+			log.Printf("❌ Failed to set recipient %s: %v", recipient, err)
 			return fmt.Errorf("failed to set recipient %s: %w", recipient, err)
 		}
+		log.Printf("✅ Recipient set successfully: %s", recipient)
 	}
 
 	// Send message
 	w, err := client.Data()
 	if err != nil {
+		log.Printf("❌ Failed to send DATA command: %v", err)
 		return fmt.Errorf("failed to send DATA command: %w", err)
 	}
 
 	_, err = w.Write(message)
 	if err != nil {
+		log.Printf("❌ Failed to write message: %v", err)
 		return fmt.Errorf("failed to write message: %w", err)
 	}
 
 	err = w.Close()
 	if err != nil {
+		log.Printf("❌ Failed to close writer: %v", err)
 		return fmt.Errorf("failed to close writer: %w", err)
 	}
 
-	return client.Quit()
+	log.Printf("✅ Message sent successfully")
+
+	err = client.Quit()
+	if err != nil {
+		log.Printf("❌ Failed to quit SMTP session: %v", err)
+		return fmt.Errorf("failed to quit SMTP session: %w", err)
+	}
+
+	log.Printf("✅ SMTP session closed successfully")
+	return nil
 }
 
 // Kirim email dengan retry mechanism
@@ -227,14 +266,17 @@ func SendEmail(config EmailConfig) error {
 	// Ambil SMTP config
 	smtpConfig, err := getSMTPConfig()
 	if err != nil {
+		log.Printf("❌ Failed to get SMTP config: %v", err)
 		return fmt.Errorf("failed to get SMTP config: %w", err)
 	}
 
-	// PERBAIKAN: Kurangi jumlah retry dan waktu tunggu
+	// Kurangi jumlah retry dan waktu tunggu
 	maxRetries := 2
 	var lastErr error
 
 	for i := 0; i < maxRetries; i++ {
+		log.Printf("📧 Attempt %d to send email to %s", i+1, config.To)
+
 		// Try to send email
 		err := sendSMTPEmail(config, smtpConfig)
 		if err == nil {
@@ -253,6 +295,7 @@ func SendEmail(config EmailConfig) error {
 		}
 	}
 
+	log.Printf("❌ All attempts failed to send email to %s", config.To)
 	return fmt.Errorf("failed to send email after %d attempts, last error: %w", maxRetries, lastErr)
 }
 
@@ -275,7 +318,7 @@ func SendEmailWithTimeout(config EmailConfig, timeout time.Duration) error {
 	}
 }
 
-// PERBAIKAN: Pisahkan pembuatan template email
+// Pisahkan pembuatan template email
 func GenerateOrderEmailTemplate(orderID uint, username, jokiType, buktiTransferPath string) string {
 	// Ambil URL
 	backendURL := os.Getenv("BACKEND_URL")
@@ -489,8 +532,11 @@ func SendNewOrderNotificationEmail(orderID uint, username, jokiType, buktiTransf
 	// Ambil email admin
 	adminEmail := os.Getenv("ADMIN_NOTIFICATION_EMAIL")
 	if adminEmail == "" {
+		log.Printf("❌ ADMIN_NOTIFICATION_EMAIL is not set in environment variables")
 		return fmt.Errorf("ADMIN_NOTIFICATION_EMAIL is not set in environment variables")
 	}
+
+	log.Printf("📧 Preparing to send order notification email to %s", adminEmail)
 
 	config := EmailConfig{
 		To:      adminEmail,
@@ -680,8 +726,11 @@ func SendCustomServiceRequestEmail(requestID uint, name, email, service string) 
 	// Ambil email admin
 	adminEmail := os.Getenv("ADMIN_NOTIFICATION_EMAIL")
 	if adminEmail == "" {
+		log.Printf("❌ ADMIN_NOTIFICATION_EMAIL is not set in environment variables")
 		return fmt.Errorf("ADMIN_NOTIFICATION_EMAIL is not set in environment variables")
 	}
+
+	log.Printf("📧 Preparing to send custom service request email to %s", adminEmail)
 
 	config := EmailConfig{
 		To:      adminEmail,
