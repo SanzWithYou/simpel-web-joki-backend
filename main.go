@@ -58,6 +58,28 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	})
 
+	// ⚠️ PENTING: Health check HARUS sebelum middleware!
+	// Leapcell health check endpoints - TANPA middleware apapun
+	app.Get("/kaithhealthcheck", func(c *fiber.Ctx) error {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"status": "ok",
+		})
+	})
+
+	app.Get("/kaithheathcheck", func(c *fiber.Ctx) error {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"status": "ok",
+		})
+	})
+
+	// Health check standard
+	app.Get("/health", func(c *fiber.Ctx) error {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"status":    "healthy",
+			"timestamp": time.Now().Unix(),
+		})
+	})
+
 	// Setup CORS
 	allowedOrigins := os.Getenv("ALLOWED_ORIGINS")
 	if allowedOrigins == "" {
@@ -73,7 +95,7 @@ func main() {
 		MaxAge:           86400,
 	}))
 
-	// Middleware
+	// Middleware - SETELAH health check
 	app.Use(recover.New())
 	app.Use(middleware.Logger())
 	app.Use(middleware.ErrorHandler())
@@ -92,28 +114,7 @@ func main() {
 	routes.SetupFileRoutes(app, fileHandler)
 	routes.SetupCustomServiceRequestRoutes(app, customServiceRequestHandler, customServiceRequestConfig)
 
-	// Health check endpoints
-	app.Get("/health", func(c *fiber.Ctx) error {
-		return utils.SuccessResponse(c, fiber.StatusOK, "API is running", fiber.Map{
-			"status":    "healthy",
-			"timestamp": time.Now().Unix(),
-		})
-	})
-
-	// Leapcell health check endpoints
-	app.Get("/kaithhealthcheck", func(c *fiber.Ctx) error {
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"status": "ok",
-		})
-	})
-
-	app.Get("/kaithheathcheck", func(c *fiber.Ctx) error {
-		return c.Status(fiber.StatusOK).JSON(fiber.Map{
-			"status": "ok",
-		})
-	})
-
-	// Test email endpoint (untuk debugging - hapus setelah production stabil)
+	// Test email endpoint (untuk debugging)
 	app.Get("/test-email", func(c *fiber.Ctx) error {
 		log.Println("🧪 Testing email...")
 
@@ -142,11 +143,11 @@ func main() {
 	// Start server
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080" // Default untuk production (Leapcell butuh 8080)
+		port = "8080"
 	}
 
 	log.Printf("🔥 Server starting on port %s", port)
-	log.Printf("🌍 Environment: %s", os.Getenv("ENV"))
+	log.Printf("🌍 CORS allowed origins: %s", allowedOrigins)
 
 	if err := app.Listen("0.0.0.0:" + port); err != nil {
 		log.Fatal("❌ Gagal menjalankan server:", err)
