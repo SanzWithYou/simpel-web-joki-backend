@@ -2,6 +2,7 @@ package utils
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -137,7 +138,7 @@ func buildEmailMessage(config EmailConfig, smtpConfig *SMTPConfig) []byte {
 	return buf.Bytes()
 }
 
-// PERBAIKAN: Fungsi untuk membuat alamat server yang kompatibel dengan IPv6
+// Fungsi untuk membuat alamat server yang kompatibel dengan IPv6
 func formatServerAddress(host, port string) string {
 	// Jika host adalah alamat IPv6 (mengandung : dan tidak diapit [])
 	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") && !strings.HasSuffix(host, "]") {
@@ -145,6 +146,165 @@ func formatServerAddress(host, port string) string {
 	}
 	// Untuk IPv4 atau hostname, gunakan format biasa
 	return fmt.Sprintf("%s:%s", host, port)
+}
+
+// PERBAIKAN: Fungsi diagnostik koneksi jaringan
+func diagnoseNetworkIssues(host, port string) error {
+	log.Printf("🔍 Diagnosing network connectivity issues...")
+
+	// 1. Coba resolve DNS
+	log.Printf("🌐 Testing DNS resolution for host: %s", host)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var resolver net.Resolver
+	addresses, err := resolver.LookupHost(ctx, host)
+	if err != nil {
+		log.Printf("❌ DNS resolution failed for %s: %v", host, err)
+		return fmt.Errorf("DNS resolution failed for %s: %w", host, err)
+	}
+
+	log.Printf("✅ DNS resolution successful. %s resolves to: %v", host, addresses)
+
+	// 2. Coba koneksi TCP ke setiap alamat IP
+	serverAddr := formatServerAddress(host, port)
+	log.Printf("🔌 Testing TCP connection to %s", serverAddr)
+
+	for _, addr := range addresses {
+		ipAddr := formatServerAddress(addr, port)
+		log.Printf("🔌 Testing connection to IP address: %s", ipAddr)
+
+		dialer := &net.Dialer{
+			Timeout: 10 * time.Second,
+		}
+
+		conn, err := dialer.Dial("tcp", ipAddr)
+		if err != nil {
+			log.Printf("❌ TCP connection to %s failed: %v", ipAddr, err)
+			continue
+		}
+
+		log.Printf("✅ TCP connection to %s successful", ipAddr)
+		conn.Close()
+		return nil
+	}
+
+	return fmt.Errorf("failed to establish TCP connection to any IP address of %s", host)
+}
+
+// PERBAIKAN: Fungsi untuk mengecek apakah port terbuka
+func checkPortOpen(host, port string) error {
+	log.Printf("🔍 Checking if port %s is open on host %s", port, host)
+
+	serverAddr := formatServerAddress(host, port)
+
+	dialer := &net.Dialer{
+		Timeout: 10 * time.Second,
+	}
+
+	conn, err := dialer.Dial("tcp", serverAddr)
+	if err != nil {
+		log.Printf("❌ Port %s is not open on %s: %v", port, host, err)
+		return fmt.Errorf("port %s is not open on %s: %w", port, host, err)
+	}
+	defer conn.Close()
+
+	log.Printf("✅ Port %s is open on %s", port, host)
+	return nil
+}
+
+// PERBAIKAN: Fungsi untuk verifikasi koneksi SMTP yang lebih detail
+func verifySMTPConnection(smtpConfig *SMTPConfig) error {
+	log.Printf("🔍 Verifying SMTP connection configuration...")
+
+	// Log konfigurasi yang akan digunakan
+	log.Printf("📧 Connection Configuration:")
+	log.Printf("   - Host: %s", smtpConfig.Host)
+	log.Printf("   - Port: %s", smtpConfig.Port)
+	log.Printf("   - Username: %s", smtpConfig.Username)
+	log.Printf("   - From: %s", smtpConfig.From)
+	log.Printf("   - From Name: %s", smtpConfig.FromName)
+
+	// Format alamat server
+	serverAddr := formatServerAddress(smtpConfig.Host, smtpConfig.Port)
+	log.Printf("🔌 Formatted server address: %s", serverAddr)
+
+	// PERBAIKAN: Jalankan diagnostik jaringan terlebih dahulu
+	if err := diagnoseNetworkIssues(smtpConfig.Host, smtpConfig.Port); err != nil {
+		log.Printf("❌ Network diagnostics failed: %v", err)
+		return fmt.Errorf("network diagnostics failed: %w", err)
+	}
+
+	// PERBAIKAN: Cek apakah port terbuka
+	if err := checkPortOpen(smtpConfig.Host, smtpConfig.Port); err != nil {
+		log.Printf("❌ Port check failed: %v", err)
+		return fmt.Errorf("port check failed: %w", err)
+	}
+
+	// Coba koneksi TCP tanpa autentikasi
+	log.Printf("🔌 Testing TCP connection to %s", serverAddr)
+	dialer := &net.Dialer{
+		Timeout: 15 * time.Second,
+	}
+
+	conn, err := dialer.Dial("tcp", serverAddr)
+	if err != nil {
+		log.Printf("❌ TCP connection failed: %v", err)
+		return fmt.Errorf("TCP connection failed: %w", err)
+	}
+	defer conn.Close()
+
+	log.Printf("✅ TCP connection established successfully")
+
+	// Coba buat client SMTP
+	client, err := smtp.NewClient(conn, smtpConfig.Host)
+	if err != nil {
+		log.Printf("❌ Failed to create SMTP client: %v", err)
+		return fmt.Errorf("failed to create SMTP client: %w", err)
+	}
+	defer client.Close()
+
+	log.Printf("✅ SMTP client created successfully")
+
+	// Coba StartTLS
+	tlsConfig := &tls.Config{
+		ServerName:         smtpConfig.Host,
+		InsecureSkipVerify: false, // Set to true for testing only
+	}
+
+	if err = client.StartTLS(tlsConfig); err != nil {
+		log.Printf("❌ TLS handshake failed: %v", err)
+		return fmt.Errorf("TLS handshake failed: %w", err)
+	}
+
+	log.Printf("✅ TLS handshake successful")
+
+	// Coba autentikasi
+	auth := smtp.PlainAuth("", smtpConfig.Username, smtpConfig.Password, smtpConfig.Host)
+	if err = client.Auth(auth); err != nil {
+		log.Printf("❌ Authentication failed: %v", err)
+		return fmt.Errorf("authentication failed: %w", err)
+	}
+
+	log.Printf("✅ Authentication successful")
+
+	// Coba set sender
+	if err = client.Mail(smtpConfig.From); err != nil {
+		log.Printf("❌ Failed to set sender: %v", err)
+		return fmt.Errorf("failed to set sender: %w", err)
+	}
+
+	log.Printf("✅ Sender set successfully")
+
+	// Tutup koneksi
+	if err = client.Quit(); err != nil {
+		log.Printf("❌ Failed to close SMTP session: %v", err)
+		return fmt.Errorf("failed to close SMTP session: %w", err)
+	}
+
+	log.Printf("✅ SMTP connection verification completed successfully")
+	return nil
 }
 
 // Kirim email dengan SMTP
@@ -160,7 +320,7 @@ func sendSMTPEmail(config EmailConfig, smtpConfig *SMTPConfig) error {
 	// Setup authentication
 	auth := smtp.PlainAuth("", smtpConfig.Username, smtpConfig.Password, smtpConfig.Host)
 
-	// PERBAIKAN: Gunakan fungsi formatServerAddress untuk menangani IPv6
+	// Gunakan fungsi formatServerAddress untuk menangani IPv6
 	serverAddr := formatServerAddress(smtpConfig.Host, smtpConfig.Port)
 
 	log.Printf("🔌 Attempting to connect to SMTP server: %s", serverAddr)
@@ -268,6 +428,13 @@ func SendEmail(config EmailConfig) error {
 	if err != nil {
 		log.Printf("❌ Failed to get SMTP config: %v", err)
 		return fmt.Errorf("failed to get SMTP config: %w", err)
+	}
+
+	// Verifikasi koneksi SMTP sebelum mencoba mengirim
+	log.Printf("🔍 Verifying SMTP connection before sending email...")
+	if err := verifySMTPConnection(smtpConfig); err != nil {
+		log.Printf("❌ SMTP connection verification failed: %v", err)
+		return fmt.Errorf("SMTP connection verification failed: %w", err)
 	}
 
 	// Kurangi jumlah retry dan waktu tunggu
