@@ -5,9 +5,7 @@ import (
 	"backend/models"
 	"backend/utils"
 	"context"
-	"fmt"
 	"log"
-	"os"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -119,12 +117,8 @@ func (h *OrderHandler) CreateOrderWithFile(c *fiber.Ctx) error {
 
 		// Kirim email di goroutine terpisah
 		go func() {
-			// PERBAIKAN: Gunakan fungsi dengan timeout yang lebih pendek
-			err := utils.SendEmailWithTimeout(utils.EmailConfig{
-				To:      os.Getenv("ADMIN_NOTIFICATION_EMAIL"),
-				Subject: fmt.Sprintf("Order Baru #%d - Segera Proses!", order.ID),
-				HTML:    utils.GenerateOrderEmailTemplate(order.ID, username, joki, order.BuktiTransfer),
-			}, 25*time.Second) // Timeout 25 detik untuk pengiriman email
+			// PERBAIKAN: Gunakan fungsi SendNewOrderNotificationEmail yang sudah diperbarui
+			err := utils.SendNewOrderNotificationEmail(order.ID, username, joki, order.BuktiTransfer)
 			done <- err
 		}()
 

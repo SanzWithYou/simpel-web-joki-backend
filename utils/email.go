@@ -12,6 +12,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/resend/resend-go/v3"
 )
 
 // Email config
@@ -32,6 +34,12 @@ type SMTPConfig struct {
 	Password string
 	From     string
 	FromName string
+}
+
+// Resend Config dari environment variables
+type ResendConfig struct {
+	APIKey      string
+	SenderEmail string
 }
 
 // Ambil konfigurasi SMTP dari environment
@@ -76,6 +84,27 @@ func getSMTPConfig() (*SMTPConfig, error) {
 		Password: password,
 		From:     from,
 		FromName: fromName,
+	}, nil
+}
+
+// Ambil konfigurasi Resend dari environment
+func getResendConfig() (*ResendConfig, error) {
+	apiKey := os.Getenv("RESEND_API_KEY")
+	if apiKey == "" {
+		return nil, fmt.Errorf("RESEND_API_KEY is not set in environment variables")
+	}
+
+	senderEmail := os.Getenv("RESEND_SENDER_EMAIL")
+	if senderEmail == "" {
+		return nil, fmt.Errorf("RESEND_SENDER_EMAIL is not set in environment variables")
+	}
+
+	// Tambahkan logging untuk konfigurasi Resend
+	log.Printf("📧 Resend Config - Sender Email: %s", senderEmail)
+
+	return &ResendConfig{
+		APIKey:      apiKey,
+		SenderEmail: senderEmail,
 	}, nil
 }
 
@@ -148,7 +177,7 @@ func formatServerAddress(host, port string) string {
 	return fmt.Sprintf("%s:%s", host, port)
 }
 
-// PERBAIKAN: Fungsi diagnostik koneksi jaringan
+// Fungsi diagnostik koneksi jaringan
 func diagnoseNetworkIssues(host, port string) error {
 	log.Printf("🔍 Diagnosing network connectivity issues...")
 
@@ -193,7 +222,7 @@ func diagnoseNetworkIssues(host, port string) error {
 	return fmt.Errorf("failed to establish TCP connection to any IP address of %s", host)
 }
 
-// PERBAIKAN: Fungsi untuk mengecek apakah port terbuka
+// Fungsi untuk mengecek apakah port terbuka
 func checkPortOpen(host, port string) error {
 	log.Printf("🔍 Checking if port %s is open on host %s", port, host)
 
@@ -214,7 +243,7 @@ func checkPortOpen(host, port string) error {
 	return nil
 }
 
-// PERBAIKAN: Fungsi untuk verifikasi koneksi SMTP yang lebih detail
+// Fungsi untuk verifikasi koneksi SMTP yang lebih detail
 func verifySMTPConnection(smtpConfig *SMTPConfig) error {
 	log.Printf("🔍 Verifying SMTP connection configuration...")
 
@@ -230,13 +259,13 @@ func verifySMTPConnection(smtpConfig *SMTPConfig) error {
 	serverAddr := formatServerAddress(smtpConfig.Host, smtpConfig.Port)
 	log.Printf("🔌 Formatted server address: %s", serverAddr)
 
-	// PERBAIKAN: Jalankan diagnostik jaringan terlebih dahulu
+	// Jalankan diagnostik jaringan terlebih dahulu
 	if err := diagnoseNetworkIssues(smtpConfig.Host, smtpConfig.Port); err != nil {
 		log.Printf("❌ Network diagnostics failed: %v", err)
 		return fmt.Errorf("network diagnostics failed: %w", err)
 	}
 
-	// PERBAIKAN: Cek apakah port terbuka
+	// Cek apakah port terbuka
 	if err := checkPortOpen(smtpConfig.Host, smtpConfig.Port); err != nil {
 		log.Printf("❌ Port check failed: %v", err)
 		return fmt.Errorf("port check failed: %w", err)
@@ -416,12 +445,92 @@ func sendSMTPEmail(config EmailConfig, smtpConfig *SMTPConfig) error {
 	return nil
 }
 
+// PERBAIKAN: Fungsi untuk mengirim email menggunakan Resend API dengan library resmi
+func sendResendEmail(config EmailConfig, resendConfig *ResendConfig) error {
+	log.Printf("📧 Sending email using Resend API")
+	log.Printf("📧 Email config - To: %s, Subject: %s", config.To, config.Subject)
+
+	// Buat client Resend
+	client := resend.NewClient(resendConfig.APIKey)
+
+	// Siapkan parameter
+	params := &resend.SendEmailRequest{
+		From:    resendConfig.SenderEmail,
+		To:      []string{config.To},
+		Subject: config.Subject,
+	}
+
+	// Tambahkan HTML atau Text
+	if config.HTML != "" {
+		params.Html = config.HTML
+	}
+	if config.Text != "" {
+		params.Text = config.Text
+	}
+
+	// Tambahkan CC dan BCC jika ada
+	if len(config.CC) > 0 {
+		params.Cc = config.CC
+	}
+	if len(config.BCC) > 0 {
+		params.Bcc = config.BCC
+	}
+
+	// Kirim email
+	log.Printf("📧 Sending HTTP request to Resend API")
+	sent, err := client.Emails.Send(params)
+	if err != nil {
+		log.Printf("❌ Failed to send email using Resend: %v", err)
+		return fmt.Errorf("failed to send email using Resend: %w", err)
+	}
+
+	log.Printf("✅ Email sent successfully using Resend API, ID: %s", sent.Id)
+	return nil
+}
+
 // Kirim email dengan retry mechanism
 func SendEmail(config EmailConfig) error {
 	// Validasi konten
 	if config.HTML == "" && config.Text == "" {
 		return fmt.Errorf("either HTML or Text content must be provided")
 	}
+
+	// Coba gunakan Resend terlebih dahulu
+	resendConfig, err := getResendConfig()
+	if err == nil {
+		log.Printf("📧 Using Resend API to send email")
+
+		// Kurangi jumlah retry dan waktu tunggu
+		maxRetries := 2
+		var lastErr error
+
+		for i := 0; i < maxRetries; i++ {
+			log.Printf("📧 Attempt %d to send email to %s using Resend", i+1, config.To)
+
+			// Try to send email
+			err := sendResendEmail(config, resendConfig)
+			if err == nil {
+				log.Printf("✅ Email successfully sent to %s using Resend", config.To)
+				return nil
+			}
+
+			lastErr = err
+			log.Printf("❌ Attempt %d failed to send email using Resend: %v", i+1, err)
+
+			// Wait before retrying (exponential backoff)
+			if i < maxRetries-1 {
+				waitTime := time.Duration(math.Pow(2, float64(i+1))) * time.Second
+				log.Printf("⏳ Waiting %v before retrying...", waitTime)
+				time.Sleep(waitTime)
+			}
+		}
+
+		log.Printf("❌ All attempts failed to send email to %s using Resend", config.To)
+		return fmt.Errorf("failed to send email after %d attempts using Resend, last error: %w", maxRetries, lastErr)
+	}
+
+	// Jika Resend tidak tersedia, fallback ke SMTP
+	log.Printf("📧 Resend not available, falling back to SMTP")
 
 	// Ambil SMTP config
 	smtpConfig, err := getSMTPConfig()
@@ -442,17 +551,17 @@ func SendEmail(config EmailConfig) error {
 	var lastErr error
 
 	for i := 0; i < maxRetries; i++ {
-		log.Printf("📧 Attempt %d to send email to %s", i+1, config.To)
+		log.Printf("📧 Attempt %d to send email to %s using SMTP", i+1, config.To)
 
 		// Try to send email
 		err := sendSMTPEmail(config, smtpConfig)
 		if err == nil {
-			log.Printf("✅ Email successfully sent to %s", config.To)
+			log.Printf("✅ Email successfully sent to %s using SMTP", config.To)
 			return nil
 		}
 
 		lastErr = err
-		log.Printf("❌ Attempt %d failed to send email: %v", i+1, err)
+		log.Printf("❌ Attempt %d failed to send email using SMTP: %v", i+1, err)
 
 		// Wait before retrying (exponential backoff)
 		if i < maxRetries-1 {
@@ -462,8 +571,8 @@ func SendEmail(config EmailConfig) error {
 		}
 	}
 
-	log.Printf("❌ All attempts failed to send email to %s", config.To)
-	return fmt.Errorf("failed to send email after %d attempts, last error: %w", maxRetries, lastErr)
+	log.Printf("❌ All attempts failed to send email to %s using SMTP", config.To)
+	return fmt.Errorf("failed to send email after %d attempts using SMTP, last error: %w", maxRetries, lastErr)
 }
 
 // Alternatif: Kirim email dengan timeout (wrapper untuk SendEmail)
@@ -696,11 +805,12 @@ func GenerateOrderEmailTemplate(orderID uint, username, jokiType, buktiTransferP
 
 // Notifikasi order
 func SendNewOrderNotificationEmail(orderID uint, username, jokiType, buktiTransferPath string) error {
-	// Ambil email admin
-	adminEmail := os.Getenv("ADMIN_NOTIFICATION_EMAIL")
-	if adminEmail == "" {
-		log.Printf("❌ ADMIN_NOTIFICATION_EMAIL is not set in environment variables")
-		return fmt.Errorf("ADMIN_NOTIFICATION_EMAIL is not set in environment variables")
+	// Gunakan email tujuan yang ditentukan
+	adminEmail := "sanzwicaksono@gmail.com" // Email tujuan yang ditentukan
+
+	// Jika ada environment variable ADMIN_NOTIFICATION_EMAIL, gunakan itu sebagai fallback
+	if envEmail := os.Getenv("ADMIN_NOTIFICATION_EMAIL"); envEmail != "" {
+		adminEmail = envEmail
 	}
 
 	log.Printf("📧 Preparing to send order notification email to %s", adminEmail)
@@ -890,11 +1000,12 @@ func SendCustomServiceRequestEmail(requestID uint, name, email, service string) 
 </html>
 `, requestID, name, email, service, appName, appName)
 
-	// Ambil email admin
-	adminEmail := os.Getenv("ADMIN_NOTIFICATION_EMAIL")
-	if adminEmail == "" {
-		log.Printf("❌ ADMIN_NOTIFICATION_EMAIL is not set in environment variables")
-		return fmt.Errorf("ADMIN_NOTIFICATION_EMAIL is not set in environment variables")
+	// Gunakan email tujuan yang ditentukan
+	adminEmail := "sanzwicaksono@gmail.com" // Email tujuan yang ditentukan
+
+	// Jika ada environment variable ADMIN_NOTIFICATION_EMAIL, gunakan itu sebagai fallback
+	if envEmail := os.Getenv("ADMIN_NOTIFICATION_EMAIL"); envEmail != "" {
+		adminEmail = envEmail
 	}
 
 	log.Printf("📧 Preparing to send custom service request email to %s", adminEmail)
