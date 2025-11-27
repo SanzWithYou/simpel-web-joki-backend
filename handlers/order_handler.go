@@ -98,14 +98,14 @@ func (h *OrderHandler) CreateOrderWithFile(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, fiber.StatusInternalServerError, "Gagal membuat order", err)
 	}
 
-	// PERBAIKAN: Kirim email dengan background context yang tidak terikat HTTP request
+	// Kirim email dengan background context yang tidak terikat HTTP request
 	log.Printf("🚀 Starting email notification for order %d", order.ID)
 
 	// Gunakan background context yang independent dari HTTP request
 	go func() {
-		// PENTING: Gunakan context.Background() bukan context dari HTTP request
+		// Gunakan context.Background() bukan context dari HTTP request
 		// Ini memastikan goroutine tidak di-cancel saat HTTP response selesai
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Kurangi timeout menjadi 30 detik
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		// Log start
@@ -117,7 +117,7 @@ func (h *OrderHandler) CreateOrderWithFile(c *fiber.Ctx) error {
 
 		// Kirim email di goroutine terpisah
 		go func() {
-			// PERBAIKAN: Gunakan fungsi SendNewOrderNotificationEmail yang sudah diperbarui
+			// Gunakan fungsi SendNewOrderNotificationEmail yang sudah diperbarui
 			err := utils.SendNewOrderNotificationEmail(order.ID, username, joki, order.BuktiTransfer)
 			done <- err
 		}()
@@ -127,7 +127,7 @@ func (h *OrderHandler) CreateOrderWithFile(c *fiber.Ctx) error {
 		case emailErr := <-done:
 			if emailErr != nil {
 				log.Printf("❌ Failed to send admin notification email for order %d: %v", order.ID, emailErr)
-				// PERBAIKAN: Tambahkan informasi error lebih detail
+				// Tambahkan informasi error lebih detail
 				log.Printf("❌ Error details: %+v", emailErr)
 			} else {
 				log.Printf("✅ Admin notification email sent successfully for order %d", order.ID)

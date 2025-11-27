@@ -1,14 +1,8 @@
 package utils
 
 import (
-	"bytes"
-	"context"
-	"crypto/tls"
 	"fmt"
 	"log"
-	"math"
-	"net"
-	"net/smtp"
 	"os"
 	"strings"
 	"time"
@@ -26,65 +20,10 @@ type EmailConfig struct {
 	BCC     []string
 }
 
-// SMTP Config dari environment variables
-type SMTPConfig struct {
-	Host     string
-	Port     string
-	Username string
-	Password string
-	From     string
-	FromName string
-}
-
 // Resend Config dari environment variables
 type ResendConfig struct {
 	APIKey      string
 	SenderEmail string
-}
-
-// Ambil konfigurasi SMTP dari environment
-func getSMTPConfig() (*SMTPConfig, error) {
-	host := os.Getenv("SMTP_HOST")
-	if host == "" {
-		return nil, fmt.Errorf("SMTP_HOST is not set in environment variables")
-	}
-
-	port := os.Getenv("SMTP_PORT")
-	if port == "" {
-		port = "587" // default port
-	}
-
-	username := os.Getenv("SMTP_USERNAME")
-	if username == "" {
-		return nil, fmt.Errorf("SMTP_USERNAME is not set in environment variables")
-	}
-
-	password := os.Getenv("SMTP_PASSWORD")
-	if password == "" {
-		return nil, fmt.Errorf("SMTP_PASSWORD is not set in environment variables")
-	}
-
-	from := os.Getenv("SMTP_FROM_EMAIL")
-	if from == "" {
-		from = username // gunakan username sebagai default
-	}
-
-	fromName := os.Getenv("SMTP_FROM_NAME")
-	if fromName == "" {
-		fromName = "Zem Store"
-	}
-
-	// Tambahkan logging untuk konfigurasi SMTP
-	log.Printf("📧 SMTP Config - Host: %s, Port: %s, Username: %s, From: %s", host, port, username, from)
-
-	return &SMTPConfig{
-		Host:     host,
-		Port:     port,
-		Username: username,
-		Password: password,
-		From:     from,
-		FromName: fromName,
-	}, nil
 }
 
 // Ambil konfigurasi Resend dari environment
@@ -108,344 +47,7 @@ func getResendConfig() (*ResendConfig, error) {
 	}, nil
 }
 
-// Build email message dengan format MIME
-func buildEmailMessage(config EmailConfig, smtpConfig *SMTPConfig) []byte {
-	var buf bytes.Buffer
-
-	// Headers
-	buf.WriteString(fmt.Sprintf("From: %s <%s>\r\n", smtpConfig.FromName, smtpConfig.From))
-	buf.WriteString(fmt.Sprintf("To: %s\r\n", config.To))
-
-	if len(config.CC) > 0 {
-		buf.WriteString(fmt.Sprintf("Cc: %s\r\n", strings.Join(config.CC, ", ")))
-	}
-
-	if len(config.BCC) > 0 {
-		buf.WriteString(fmt.Sprintf("Bcc: %s\r\n", strings.Join(config.BCC, ", ")))
-	}
-
-	buf.WriteString(fmt.Sprintf("Subject: %s\r\n", config.Subject))
-	buf.WriteString("MIME-Version: 1.0\r\n")
-
-	// Jika ada HTML dan Text, gunakan multipart/alternative
-	if config.HTML != "" && config.Text != "" {
-		boundary := "boundary-" + time.Now().Format("20060102150405")
-		buf.WriteString(fmt.Sprintf("Content-Type: multipart/alternative; boundary=\"%s\"\r\n", boundary))
-		buf.WriteString("\r\n")
-
-		// Plain text part
-		buf.WriteString(fmt.Sprintf("--%s\r\n", boundary))
-		buf.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")
-		buf.WriteString("Content-Transfer-Encoding: 7bit\r\n")
-		buf.WriteString("\r\n")
-		buf.WriteString(config.Text)
-		buf.WriteString("\r\n")
-
-		// HTML part
-		buf.WriteString(fmt.Sprintf("--%s\r\n", boundary))
-		buf.WriteString("Content-Type: text/html; charset=\"UTF-8\"\r\n")
-		buf.WriteString("Content-Transfer-Encoding: 7bit\r\n")
-		buf.WriteString("\r\n")
-		buf.WriteString(config.HTML)
-		buf.WriteString("\r\n")
-
-		buf.WriteString(fmt.Sprintf("--%s--\r\n", boundary))
-	} else if config.HTML != "" {
-		// Hanya HTML
-		buf.WriteString("Content-Type: text/html; charset=\"UTF-8\"\r\n")
-		buf.WriteString("Content-Transfer-Encoding: 7bit\r\n")
-		buf.WriteString("\r\n")
-		buf.WriteString(config.HTML)
-	} else if config.Text != "" {
-		// Hanya Text
-		buf.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")
-		buf.WriteString("Content-Transfer-Encoding: 7bit\r\n")
-		buf.WriteString("\r\n")
-		buf.WriteString(config.Text)
-	}
-
-	return buf.Bytes()
-}
-
-// Fungsi untuk membuat alamat server yang kompatibel dengan IPv6
-func formatServerAddress(host, port string) string {
-	// Jika host adalah alamat IPv6 (mengandung : dan tidak diapit [])
-	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") && !strings.HasSuffix(host, "]") {
-		return fmt.Sprintf("[%s]:%s", host, port)
-	}
-	// Untuk IPv4 atau hostname, gunakan format biasa
-	return fmt.Sprintf("%s:%s", host, port)
-}
-
-// Fungsi diagnostik koneksi jaringan
-func diagnoseNetworkIssues(host, port string) error {
-	log.Printf("🔍 Diagnosing network connectivity issues...")
-
-	// 1. Coba resolve DNS
-	log.Printf("🌐 Testing DNS resolution for host: %s", host)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	var resolver net.Resolver
-	addresses, err := resolver.LookupHost(ctx, host)
-	if err != nil {
-		log.Printf("❌ DNS resolution failed for %s: %v", host, err)
-		return fmt.Errorf("DNS resolution failed for %s: %w", host, err)
-	}
-
-	log.Printf("✅ DNS resolution successful. %s resolves to: %v", host, addresses)
-
-	// 2. Coba koneksi TCP ke setiap alamat IP
-	serverAddr := formatServerAddress(host, port)
-	log.Printf("🔌 Testing TCP connection to %s", serverAddr)
-
-	for _, addr := range addresses {
-		ipAddr := formatServerAddress(addr, port)
-		log.Printf("🔌 Testing connection to IP address: %s", ipAddr)
-
-		dialer := &net.Dialer{
-			Timeout: 10 * time.Second,
-		}
-
-		conn, err := dialer.Dial("tcp", ipAddr)
-		if err != nil {
-			log.Printf("❌ TCP connection to %s failed: %v", ipAddr, err)
-			continue
-		}
-
-		log.Printf("✅ TCP connection to %s successful", ipAddr)
-		conn.Close()
-		return nil
-	}
-
-	return fmt.Errorf("failed to establish TCP connection to any IP address of %s", host)
-}
-
-// Fungsi untuk mengecek apakah port terbuka
-func checkPortOpen(host, port string) error {
-	log.Printf("🔍 Checking if port %s is open on host %s", port, host)
-
-	serverAddr := formatServerAddress(host, port)
-
-	dialer := &net.Dialer{
-		Timeout: 10 * time.Second,
-	}
-
-	conn, err := dialer.Dial("tcp", serverAddr)
-	if err != nil {
-		log.Printf("❌ Port %s is not open on %s: %v", port, host, err)
-		return fmt.Errorf("port %s is not open on %s: %w", port, host, err)
-	}
-	defer conn.Close()
-
-	log.Printf("✅ Port %s is open on %s", port, host)
-	return nil
-}
-
-// Fungsi untuk verifikasi koneksi SMTP yang lebih detail
-func verifySMTPConnection(smtpConfig *SMTPConfig) error {
-	log.Printf("🔍 Verifying SMTP connection configuration...")
-
-	// Log konfigurasi yang akan digunakan
-	log.Printf("📧 Connection Configuration:")
-	log.Printf("   - Host: %s", smtpConfig.Host)
-	log.Printf("   - Port: %s", smtpConfig.Port)
-	log.Printf("   - Username: %s", smtpConfig.Username)
-	log.Printf("   - From: %s", smtpConfig.From)
-	log.Printf("   - From Name: %s", smtpConfig.FromName)
-
-	// Format alamat server
-	serverAddr := formatServerAddress(smtpConfig.Host, smtpConfig.Port)
-	log.Printf("🔌 Formatted server address: %s", serverAddr)
-
-	// Jalankan diagnostik jaringan terlebih dahulu
-	if err := diagnoseNetworkIssues(smtpConfig.Host, smtpConfig.Port); err != nil {
-		log.Printf("❌ Network diagnostics failed: %v", err)
-		return fmt.Errorf("network diagnostics failed: %w", err)
-	}
-
-	// Cek apakah port terbuka
-	if err := checkPortOpen(smtpConfig.Host, smtpConfig.Port); err != nil {
-		log.Printf("❌ Port check failed: %v", err)
-		return fmt.Errorf("port check failed: %w", err)
-	}
-
-	// Coba koneksi TCP tanpa autentikasi
-	log.Printf("🔌 Testing TCP connection to %s", serverAddr)
-	dialer := &net.Dialer{
-		Timeout: 15 * time.Second,
-	}
-
-	conn, err := dialer.Dial("tcp", serverAddr)
-	if err != nil {
-		log.Printf("❌ TCP connection failed: %v", err)
-		return fmt.Errorf("TCP connection failed: %w", err)
-	}
-	defer conn.Close()
-
-	log.Printf("✅ TCP connection established successfully")
-
-	// Coba buat client SMTP
-	client, err := smtp.NewClient(conn, smtpConfig.Host)
-	if err != nil {
-		log.Printf("❌ Failed to create SMTP client: %v", err)
-		return fmt.Errorf("failed to create SMTP client: %w", err)
-	}
-	defer client.Close()
-
-	log.Printf("✅ SMTP client created successfully")
-
-	// Coba StartTLS
-	tlsConfig := &tls.Config{
-		ServerName:         smtpConfig.Host,
-		InsecureSkipVerify: false, // Set to true for testing only
-	}
-
-	if err = client.StartTLS(tlsConfig); err != nil {
-		log.Printf("❌ TLS handshake failed: %v", err)
-		return fmt.Errorf("TLS handshake failed: %w", err)
-	}
-
-	log.Printf("✅ TLS handshake successful")
-
-	// Coba autentikasi
-	auth := smtp.PlainAuth("", smtpConfig.Username, smtpConfig.Password, smtpConfig.Host)
-	if err = client.Auth(auth); err != nil {
-		log.Printf("❌ Authentication failed: %v", err)
-		return fmt.Errorf("authentication failed: %w", err)
-	}
-
-	log.Printf("✅ Authentication successful")
-
-	// Coba set sender
-	if err = client.Mail(smtpConfig.From); err != nil {
-		log.Printf("❌ Failed to set sender: %v", err)
-		return fmt.Errorf("failed to set sender: %w", err)
-	}
-
-	log.Printf("✅ Sender set successfully")
-
-	// Tutup koneksi
-	if err = client.Quit(); err != nil {
-		log.Printf("❌ Failed to close SMTP session: %v", err)
-		return fmt.Errorf("failed to close SMTP session: %w", err)
-	}
-
-	log.Printf("✅ SMTP connection verification completed successfully")
-	return nil
-}
-
-// Kirim email dengan SMTP
-func sendSMTPEmail(config EmailConfig, smtpConfig *SMTPConfig) error {
-	// Build recipients list
-	recipients := []string{config.To}
-	recipients = append(recipients, config.CC...)
-	recipients = append(recipients, config.BCC...)
-
-	// Build message
-	message := buildEmailMessage(config, smtpConfig)
-
-	// Setup authentication
-	auth := smtp.PlainAuth("", smtpConfig.Username, smtpConfig.Password, smtpConfig.Host)
-
-	// Gunakan fungsi formatServerAddress untuk menangani IPv6
-	serverAddr := formatServerAddress(smtpConfig.Host, smtpConfig.Port)
-
-	log.Printf("🔌 Attempting to connect to SMTP server: %s", serverAddr)
-
-	// Gunakan timeout untuk koneksi SMTP dengan cara yang benar
-	// Buat dialer dengan timeout
-	dialer := &net.Dialer{
-		Timeout: 15 * time.Second,
-	}
-
-	// Buat koneksi dengan timeout
-	conn, err := dialer.Dial("tcp", serverAddr)
-	if err != nil {
-		log.Printf("❌ Failed to connect to SMTP server: %v", err)
-		return fmt.Errorf("failed to connect to SMTP server: %w", err)
-	}
-	defer conn.Close()
-
-	log.Printf("✅ Connected to SMTP server successfully")
-
-	// Buat client SMTP dari koneksi
-	client, err := smtp.NewClient(conn, smtpConfig.Host)
-	if err != nil {
-		log.Printf("❌ Failed to create SMTP client: %v", err)
-		return fmt.Errorf("failed to create SMTP client: %w", err)
-	}
-	defer client.Close()
-
-	// Start TLS
-	tlsConfig := &tls.Config{
-		ServerName: smtpConfig.Host,
-	}
-	if err = client.StartTLS(tlsConfig); err != nil {
-		log.Printf("❌ Failed to start TLS: %v", err)
-		return fmt.Errorf("failed to start TLS: %w", err)
-	}
-
-	log.Printf("✅ TLS started successfully")
-
-	// Authenticate
-	if err = client.Auth(auth); err != nil {
-		log.Printf("❌ Failed to authenticate: %v", err)
-		return fmt.Errorf("failed to authenticate: %w", err)
-	}
-
-	log.Printf("✅ Authentication successful")
-
-	// Set sender
-	if err = client.Mail(smtpConfig.From); err != nil {
-		log.Printf("❌ Failed to set sender: %v", err)
-		return fmt.Errorf("failed to set sender: %w", err)
-	}
-
-	log.Printf("✅ Sender set successfully")
-
-	// Set recipients
-	for _, recipient := range recipients {
-		if err = client.Rcpt(recipient); err != nil {
-			log.Printf("❌ Failed to set recipient %s: %v", recipient, err)
-			return fmt.Errorf("failed to set recipient %s: %w", recipient, err)
-		}
-		log.Printf("✅ Recipient set successfully: %s", recipient)
-	}
-
-	// Send message
-	w, err := client.Data()
-	if err != nil {
-		log.Printf("❌ Failed to send DATA command: %v", err)
-		return fmt.Errorf("failed to send DATA command: %w", err)
-	}
-
-	_, err = w.Write(message)
-	if err != nil {
-		log.Printf("❌ Failed to write message: %v", err)
-		return fmt.Errorf("failed to write message: %w", err)
-	}
-
-	err = w.Close()
-	if err != nil {
-		log.Printf("❌ Failed to close writer: %v", err)
-		return fmt.Errorf("failed to close writer: %w", err)
-	}
-
-	log.Printf("✅ Message sent successfully")
-
-	err = client.Quit()
-	if err != nil {
-		log.Printf("❌ Failed to quit SMTP session: %v", err)
-		return fmt.Errorf("failed to quit SMTP session: %w", err)
-	}
-
-	log.Printf("✅ SMTP session closed successfully")
-	return nil
-}
-
-// PERBAIKAN: Fungsi untuk mengirim email menggunakan Resend API dengan library resmi
+// Fungsi untuk mengirim email menggunakan Resend API dengan library resmi
 func sendResendEmail(config EmailConfig, resendConfig *ResendConfig) error {
 	log.Printf("📧 Sending email using Resend API")
 	log.Printf("📧 Email config - To: %s, Subject: %s", config.To, config.Subject)
@@ -488,91 +90,49 @@ func sendResendEmail(config EmailConfig, resendConfig *ResendConfig) error {
 	return nil
 }
 
-// Kirim email dengan retry mechanism
+// Kirim email dengan retry mechanism (hanya Resend)
 func SendEmail(config EmailConfig) error {
 	// Validasi konten
 	if config.HTML == "" && config.Text == "" {
 		return fmt.Errorf("either HTML or Text content must be provided")
 	}
 
-	// Coba gunakan Resend terlebih dahulu
+	// Ambil konfigurasi Resend
 	resendConfig, err := getResendConfig()
-	if err == nil {
-		log.Printf("📧 Using Resend API to send email")
-
-		// Kurangi jumlah retry dan waktu tunggu
-		maxRetries := 2
-		var lastErr error
-
-		for i := 0; i < maxRetries; i++ {
-			log.Printf("📧 Attempt %d to send email to %s using Resend", i+1, config.To)
-
-			// Try to send email
-			err := sendResendEmail(config, resendConfig)
-			if err == nil {
-				log.Printf("✅ Email successfully sent to %s using Resend", config.To)
-				return nil
-			}
-
-			lastErr = err
-			log.Printf("❌ Attempt %d failed to send email using Resend: %v", i+1, err)
-
-			// Wait before retrying (exponential backoff)
-			if i < maxRetries-1 {
-				waitTime := time.Duration(math.Pow(2, float64(i+1))) * time.Second
-				log.Printf("⏳ Waiting %v before retrying...", waitTime)
-				time.Sleep(waitTime)
-			}
-		}
-
-		log.Printf("❌ All attempts failed to send email to %s using Resend", config.To)
-		return fmt.Errorf("failed to send email after %d attempts using Resend, last error: %w", maxRetries, lastErr)
-	}
-
-	// Jika Resend tidak tersedia, fallback ke SMTP
-	log.Printf("📧 Resend not available, falling back to SMTP")
-
-	// Ambil SMTP config
-	smtpConfig, err := getSMTPConfig()
 	if err != nil {
-		log.Printf("❌ Failed to get SMTP config: %v", err)
-		return fmt.Errorf("failed to get SMTP config: %w", err)
+		log.Printf("❌ Failed to get Resend config: %v", err)
+		return fmt.Errorf("failed to get Resend config: %w", err)
 	}
 
-	// Verifikasi koneksi SMTP sebelum mencoba mengirim
-	log.Printf("🔍 Verifying SMTP connection before sending email...")
-	if err := verifySMTPConnection(smtpConfig); err != nil {
-		log.Printf("❌ SMTP connection verification failed: %v", err)
-		return fmt.Errorf("SMTP connection verification failed: %w", err)
-	}
+	log.Printf("📧 Using Resend API to send email")
 
-	// Kurangi jumlah retry dan waktu tunggu
-	maxRetries := 2
+	// Retry mechanism
+	maxRetries := 3
 	var lastErr error
 
 	for i := 0; i < maxRetries; i++ {
-		log.Printf("📧 Attempt %d to send email to %s using SMTP", i+1, config.To)
+		log.Printf("📧 Attempt %d to send email to %s using Resend", i+1, config.To)
 
 		// Try to send email
-		err := sendSMTPEmail(config, smtpConfig)
+		err := sendResendEmail(config, resendConfig)
 		if err == nil {
-			log.Printf("✅ Email successfully sent to %s using SMTP", config.To)
+			log.Printf("✅ Email successfully sent to %s using Resend", config.To)
 			return nil
 		}
 
 		lastErr = err
-		log.Printf("❌ Attempt %d failed to send email using SMTP: %v", i+1, err)
+		log.Printf("❌ Attempt %d failed to send email using Resend: %v", i+1, err)
 
 		// Wait before retrying (exponential backoff)
 		if i < maxRetries-1 {
-			waitTime := time.Duration(math.Pow(2, float64(i+1))) * time.Second
+			waitTime := time.Duration(2<<uint(i)) * time.Second // 2, 4, 8 seconds
 			log.Printf("⏳ Waiting %v before retrying...", waitTime)
 			time.Sleep(waitTime)
 		}
 	}
 
-	log.Printf("❌ All attempts failed to send email to %s using SMTP", config.To)
-	return fmt.Errorf("failed to send email after %d attempts using SMTP, last error: %w", maxRetries, lastErr)
+	log.Printf("❌ All attempts failed to send email to %s using Resend", config.To)
+	return fmt.Errorf("failed to send email after %d attempts using Resend, last error: %w", maxRetries, lastErr)
 }
 
 // Alternatif: Kirim email dengan timeout (wrapper untuk SendEmail)
