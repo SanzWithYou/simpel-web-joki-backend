@@ -36,15 +36,19 @@ func main() {
 	}
 
 	// Connect DB
+	log.Println("🔌 Connecting to database...")
 	database.ConnectDB()
+	log.Println("✅ Database connected")
 
 	// Migrate models
+	log.Println("🔄 Running database migrations...")
 	if err := database.DB.AutoMigrate(
 		&models.Order{},
 		&models.CustomServiceRequest{},
 	); err != nil {
 		log.Fatal("❌ Gagal melakukan migrate database:", err)
 	}
+	log.Println("✅ Database migrations completed")
 
 	// Init Fiber
 	app := fiber.New(fiber.Config{
@@ -88,19 +92,63 @@ func main() {
 	routes.SetupFileRoutes(app, fileHandler)
 	routes.SetupCustomServiceRequestRoutes(app, customServiceRequestHandler, customServiceRequestConfig)
 
-	// Health check
+	// Health check endpoints
 	app.Get("/health", func(c *fiber.Ctx) error {
-		return utils.SuccessResponse(c, fiber.StatusOK, "API is running", nil)
+		return utils.SuccessResponse(c, fiber.StatusOK, "API is running", fiber.Map{
+			"status":    "healthy",
+			"timestamp": time.Now().Unix(),
+		})
+	})
+
+	// Leapcell health check endpoints
+	app.Get("/kaithhealthcheck", func(c *fiber.Ctx) error {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"status": "ok",
+		})
+	})
+
+	app.Get("/kaithheathcheck", func(c *fiber.Ctx) error {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"status": "ok",
+		})
+	})
+
+	// Test email endpoint (untuk debugging - hapus setelah production stabil)
+	app.Get("/test-email", func(c *fiber.Ctx) error {
+		log.Println("🧪 Testing email...")
+
+		err := utils.SendNewOrderNotificationEmail(
+			999,
+			"test-user",
+			"Test Joki",
+			"https://example.com/proof.jpg",
+		)
+
+		if err != nil {
+			log.Printf("❌ Email test failed: %v", err)
+			return c.JSON(fiber.Map{
+				"success": false,
+				"error":   err.Error(),
+			})
+		}
+
+		log.Println("✅ Email test succeeded")
+		return c.JSON(fiber.Map{
+			"success": true,
+			"message": "Email sent successfully",
+		})
 	})
 
 	// Start server
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "3000"
+		port = "8080" // Default untuk production (Leapcell butuh 8080)
 	}
 
-	log.Printf("🔥 Server berjalan di port %s", port)
-	if err := app.Listen(":" + port); err != nil {
+	log.Printf("🔥 Server starting on port %s", port)
+	log.Printf("🌍 Environment: %s", os.Getenv("ENV"))
+
+	if err := app.Listen("0.0.0.0:" + port); err != nil {
 		log.Fatal("❌ Gagal menjalankan server:", err)
 	}
 }
