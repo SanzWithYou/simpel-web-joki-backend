@@ -98,56 +98,43 @@ func (h *OrderHandler) CreateOrderWithFile(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, fiber.StatusInternalServerError, "Gagal membuat order", err)
 	}
 
-	// PERBAIKAN 1: Kirim email dengan timeout dan error handling yang lebih baik
-	// Gunakan context dengan timeout untuk mencegah goroutine hang
+	// PERBAIKAN: Kirim email dengan background context yang tidak terikat HTTP request
 	log.Printf("🚀 Starting email notification for order %d", order.ID)
 
-	// Channel untuk tracking hasil pengiriman email
-	emailDone := make(chan error, 1)
-
+	// Gunakan background context yang independent dari HTTP request
 	go func() {
-		// Context dengan timeout untuk email
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// PENTING: Gunakan context.Background() bukan context dari HTTP request
+		// Ini memastikan goroutine tidak di-cancel saat HTTP response selesai
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 
 		// Log start
 		log.Printf("📧 Attempting to send email for order %d", order.ID)
 		log.Printf("📧 Email config - Username: %s, Joki: %s", username, joki)
 
-		// Panggil fungsi pengiriman email
-		emailErr := utils.SendNewOrderNotificationEmail(order.ID, username, joki, order.BuktiTransfer)
+		// Channel untuk hasil
+		done := make(chan error, 1)
 
+		// Kirim email di goroutine terpisah
+		go func() {
+			err := utils.SendNewOrderNotificationEmail(order.ID, username, joki, order.BuktiTransfer)
+			done <- err
+		}()
+
+		// Wait dengan timeout
 		select {
-		case <-ctx.Done():
-			log.Printf("❌ Email sending cancelled/timeout for order %d: %v", order.ID, ctx.Err())
-			emailDone <- ctx.Err()
-		default:
+		case emailErr := <-done:
 			if emailErr != nil {
 				log.Printf("❌ Failed to send admin notification email for order %d: %v", order.ID, emailErr)
-				emailDone <- emailErr
 			} else {
 				log.Printf("✅ Admin notification email sent successfully for order %d", order.ID)
-				emailDone <- nil
 			}
+		case <-ctx.Done():
+			log.Printf("⏰ Email sending timeout for order %d after 45s", order.ID)
 		}
 	}()
 
-	// PERBAIKAN 2: Tunggu sebentar untuk memastikan email mulai terkirim
-	// Tapi jangan block terlalu lama
-	select {
-	case emailErr := <-emailDone:
-		if emailErr != nil {
-			// Email gagal, tapi jangan gagalkan order creation
-			log.Printf("⚠️  Order created but email failed: %v", emailErr)
-		} else {
-			log.Printf("✅ Order created and email sent successfully")
-		}
-	case <-time.After(2 * time.Second):
-		// Timeout menunggu, lanjutkan response
-		log.Printf("⏳ Email sending in progress (background)...")
-	}
-
-	// Response
+	// Response langsung tanpa menunggu email
 	response := dto.OrderResponse{
 		ID:            order.ID,
 		Username:      req.Username,
